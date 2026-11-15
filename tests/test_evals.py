@@ -55,3 +55,16 @@ async def test_simulation_records_turns_and_tools(store):
     assert [who for who, _ in sim.turns][:4] == ["Senior", "Nástroj", "Asistentka", "Senior"]
     verdict = await judge(client, "m", sim.transcript)
     assert verdict.score == 1.0 and set(verdict.criteria) == set(CRITERIA)
+
+
+def test_summarize_aggregates_repeated_runs():
+    from senior_voice.evals.run import summarize
+
+    results = [
+        {"case": "a", "score": 1.0, "failed": [], "missing_tools": []},
+        {"case": "a", "score": 0.5, "failed": ["validation"], "missing_tools": ["escalate"]},
+        {"case": "b", "score": 0.75, "failed": ["validation", "grounded"], "missing_tools": []},
+    ]
+    s = summarize(results)
+    assert s["a"] == {"runs": 2, "mean": 0.75, "fails": {"validation": 1}, "missing_tools_runs": 1}
+    assert s["b"]["fails"] == {"validation": 1, "grounded": 1}

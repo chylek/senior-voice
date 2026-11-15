@@ -75,8 +75,11 @@ async def simulate(
 ) -> Simulation:
     persona = store.load("persona.json", {})
     meds = ", ".join(f"{m['název']} {m['kdy']}" for m in persona.get("person", {}).get("léky", []))
+    profile = json.dumps(persona.get("person", {}), ensure_ascii=False)
     sim = Simulation(
-        scenario, context=f"{scenario.now:%-d. %-m. %Y %H:%M}; {STUB_OUTPUTS['get_weather']} Léky: {meds}"
+        scenario,
+        context=f"{scenario.now:%-d. %-m. %Y %H:%M}; {STUB_OUTPUTS['get_weather']} Léky: {meds}. "
+        f"Profil: {profile}",
     )
     instructions = prompts.companion(persona, {}, scenario.now, STUB_OUTPUTS["get_weather"], scenario.mode)
     said, companion_prev, senior_prev = "Haló?", None, None  # the senior picks up the phone

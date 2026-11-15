@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import datetime as dt
 import json
+from collections import defaultdict
 from pathlib import Path
 
 from openai import AsyncOpenAI
@@ -30,16 +31,42 @@ def _header() -> str:
     )
 
 
+def summarize(results: list[dict]) -> dict[str, dict]:
+    """Per case over repeated runs: mean score, how often each criterion failed, runs missing tools."""
+    by_case: dict[str, list[dict]] = defaultdict(list)
+    for r in results:
+        by_case[r["case"]].append(r)
+    summary = {}
+    for case, runs in by_case.items():
+        fails: dict[str, int] = defaultdict(int)
+        for r in runs:
+            for criterion in r["failed"]:
+                fails[criterion] += 1
+        summary[case] = {
+            "runs": len(runs),
+            "mean": sum(r["score"] for r in runs) / len(runs),
+            "fails": dict(fails),
+            "missing_tools_runs": sum(bool(r.get("missing_tools")) for r in runs),
+        }
+    return summary
+
+
 async def run_sim(args, client: AsyncOpenAI) -> list[dict]:
     scenarios = [BY_ID[i] for i in args.scenario] if args.scenario else SCENARIOS
     store = Store(Path(args.data_dir))
     sims = await asyncio.gather(
-        *(simulate(client, s, args.model, args.senior_model, store, args.turns) for s in scenarios)
+        *(
+            simulate(client, s, args.model, args.senior_model, store, args.turns)
+            for s in scenarios
+            for _ in range(args.repeat)
+        )
+    )
+    verdicts = await asyncio.gather(
+        *(judge(client, args.judge_model, sim.transcript, sim.scenario.focus, sim.context) for sim in sims)
     )
     results = []
     print(_header())
-    for sim in sims:
-        verdict = await judge(client, args.judge_model, sim.transcript, sim.scenario.focus, sim.context)
+    for sim, verdict in zip(sims, verdicts, strict=True):
         print(_row(sim.scenario.id, verdict, sim.missing_tools))
         results.append(
             {
@@ -52,6 +79,14 @@ async def run_sim(args, client: AsyncOpenAI) -> list[dict]:
                 "transcript": sim.transcript,
             }
         )
+    if args.repeat > 1:
+        print("\nper case over", args.repeat, "runs:")
+        for case, agg in summarize(results).items():
+            fails = ", ".join(f"{k}×{v}" for k, v in agg["fails"].items()) or "-"
+            tools = (
+                f"  missing tools in {agg['missing_tools_runs']} runs" if agg["missing_tools_runs"] else ""
+            )
+            print(f"{case:<28} {agg['mean']:>5.0%}  fails: {fails}{tools}")
     return results
 
 
@@ -81,6 +116,7 @@ def main(argv: list[str] | None = None) -> None:
     sim.add_argument("--model", default="gpt-6-luna", help="companion proxy model")
     sim.add_argument("--senior-model", default="gpt-6-luna")
     sim.add_argument("--turns", type=int, default=8)
+    sim.add_argument("--repeat", type=int, default=1, help="runs per scenario (LLM sims are noisy)")
     sim.add_argument(
         "--data-dir", default="data", help="persona.json location (falls back to the bundled one)"
     )
@@ -92,7 +128,7 @@ def main(argv: list[str] | None = None) -> None:
     runner = run_sim if args.command == "sim" else run_transcripts
     results = asyncio.run(runner(args, client))
     out = Path(args.out)
-    out.mkdir(exist_ok=True)
+    out.mkdir(parents=True, exist_ok=True)
     path = out / f"{dt.datetime.now():%Y%m%d-%H%M%S}-{args.command}.jsonl"
     path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in results))
     mean = sum(r["score"] for r in results) / len(results) if results else 0
