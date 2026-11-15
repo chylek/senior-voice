@@ -169,3 +169,7 @@ telephony/asterisk/   PBX config for SIP provider ↔ OpenAI
 - Czech pronunciation is good but not native; it has a slight Eastern-European accent.
 - On a silent line, the model seems to wait for the callee to speak first.
 - The nightly cross-call librarian pass is not built; the per-call update has been enough so far.
+
+## License
+
+MIT, see [LICENSE](LICENSE).

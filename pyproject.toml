@@ -1,6 +1,7 @@
 [project]
 name = "senior-voice"
 version = "0.1.0"
+license = "MIT"
 description = "Czech phone companion for seniors on OpenAI GPT-Live over SIP, with tools, call memory and evals"
 readme = "README.md"
 requires-python = ">=3.12"
