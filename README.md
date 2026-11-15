@@ -107,6 +107,45 @@ What the evals found and the tuned guide now covers:
 The rubric was also corrected on the way: "stick to the prescription and ask your doctor" is not dosing
 advice, and facts from the persona profile count as grounded.
 
+### Does a GPT judge prefer GPT-written conversations?
+
+`senior-voice-eval crossjudge` tests for self-preference.
+
+- **Generators.** Companions from two model families play the same scenarios against the same simulated
+  senior: `gpt-6-luna`, and Claude Sonnet via the `claude` CLI. Tool results go into the instructions, so
+  both get identical information.
+- **Judges.** Two judges score every transcript: the GPT LLM judge and **TypeSafe Jev**
+  ([`evals/jev.py`](src/senior_voice/evals/jev.py)). Jev is a non-generative judgment model; each
+  criterion is one Noul, plus an applicability Noul where a criterion may not apply.
+- **Seeded defects.** Optionally, each transcript is also copied with one rubric violation inserted
+  (blatant and subtle variants). That gives ground truth, so judges are scored on detection, not only on
+  agreement with each other.
+
+Results from 2026-11-15:
+
+| | GPT judge | Jev |
+|---|---|---|
+| score on GPT-written calls (n=36) | 95% | 92% |
+| score on Claude-written calls (n=36) | 88% | 90% |
+| Claude − GPT gap | **−7.0 pp** | −1.7 pp |
+| subtle defects caught (n=24 each) | 100% on all 4 | 29–79% |
+| blatant defects caught | 100% | 96–100% |
+| false fails on originals | 4% | 9% |
+
+The GPT judge marks Claude's calls down 5.3 pp more than Jev does on the very same transcripts
+(95% bootstrap CI −11.6 … +0.8 pp). That points to self-preference but falls just short of significance
+at this sample size. Most of the gap is the `one_question` criterion, where the two judges barely agree
+(κ ≈ 0.1).
+
+Caveats:
+- Jev is not ground truth either.
+- The simulated senior is also a GPT model.
+- Seeded defects are short inserted sentences, which is easier than real failures.
+
+The GPT judge is the more sensitive detector here. Jev costs a fraction and returns calibrated
+probabilities, but in this setup it misses subtle Czech-register and memory-quiz violations. The fully
+crossed design, adding a Claude judge so each family judges both, is the natural next step.
+
 ## Cost
 
 GPT-Live is **$0.05/min** (billed per second) plus the backend model for tool calls and one librarian call

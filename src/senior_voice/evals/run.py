@@ -4,13 +4,19 @@ import argparse
 import asyncio
 import datetime as dt
 import json
+import os
+import random
+import statistics
 from collections import defaultdict
 from pathlib import Path
 
+import httpx
 from openai import AsyncOpenAI
 
 from ..store import Store
-from .rubric import CRITERIA, judge
+from . import crossjudge
+from .jev import JevJudge
+from .rubric import CRITERIA, Verdict, judge
 from .scenarios import BY_ID, SCENARIOS
 from .simulate import simulate
 
@@ -106,6 +112,83 @@ async def run_transcripts(args, client: AsyncOpenAI) -> list[dict]:
     return results
 
 
+class GptJudge:
+    name = "gpt"
+
+    def __init__(self, client: AsyncOpenAI, model: str):
+        self.client, self.model = client, model
+
+    async def __call__(self, transcript: str, focus: str = "", context: str = "") -> Verdict:
+        return await judge(self.client, self.model, transcript, focus, context)
+
+
+async def run_crossjudge(args, client: AsyncOpenAI) -> list[dict]:
+    scenarios = [BY_ID[i] for i in args.scenario] if args.scenario else SCENARIOS
+    persona = Store(Path(args.data_dir)).load("persona.json", {})
+    senior = crossjudge.GptGenerator(client, args.senior_model)
+    generators = [crossjudge.GptGenerator(client, args.model), crossjudge.ClaudeGenerator(args.claude_model)]
+    originals = await asyncio.gather(
+        *(
+            crossjudge.converse(g, senior, s, persona, args.turns)
+            for g in generators
+            for s in scenarios
+            for _ in range(args.reps)
+        )
+    )
+    rng = random.Random(args.seed)
+    transcripts = [
+        v for t in originals for v in (t, *(crossjudge.seed_defects(t, rng) if args.defects else ()))
+    ]
+    async with httpx.AsyncClient(timeout=60) as http:
+        judges = [GptJudge(client, args.judge_model), JevJudge(http, os.environ["JEV_API_KEY"])]
+        limit = asyncio.Semaphore(32)
+
+        async def score(t, j):
+            async with limit:
+                t.verdicts[j.name] = await j(t.text, t.scenario.focus, t.context)
+
+        await asyncio.gather(*(score(t, j) for t in transcripts for j in judges))
+    report = crossjudge.analyse(transcripts, [j.name for j in judges])
+    print_report(report, len(originals), len(transcripts) - len(originals))
+    return [
+        {
+            "case": t.scenario.id,
+            "generator": t.generator,
+            "defect": t.defect,
+            "transcript": t.text,
+            "verdicts": {j: v.criteria for j, v in t.verdicts.items()},
+            "score": statistics.mean(v.score for v in t.verdicts.values()),
+        }
+        for t in transcripts
+    ] + [{"case": "_report", "score": 0, **report}]
+
+
+def print_report(report: dict, n_orig: int, n_seeded: int) -> None:
+    print(f"{n_orig} original transcripts, {n_seeded} with one seeded defect\n")
+    print("mean rubric score on originals (judge × generator):")
+    for j, by_gen in report["scores"].items():
+        print(f"  {j:<6}" + "  ".join(f"{g} {v:.0%}" for g, v in by_gen.items()))
+    if sp := report.get("self_preference"):
+        a, b = sp["order"]
+        print(f"  {a} − {b} gap: " + ", ".join(f"{j} {v:+.1%}" for j, v in sp["gap"].items()))
+        lo, hi = sp["ci95"]
+        print(f"  difference of gaps {sp['gap_minus']:+.1%} (95% bootstrap CI {lo:+.1%} … {hi:+.1%})")
+    judges = list(report["detection"])
+    if report["detection"][judges[0]]:
+        print("\nseeded defect detected (judge said fail on that criterion):")
+        print(f"  {'defect':<26}" + "".join(f"{j:>8}" for j in judges))
+        for key in report["detection"][judges[0]]:
+            print(f"  {key:<26}" + "".join(f"{report['detection'][j][key]:>8.0%}" for j in judges))
+    print(
+        "false fail rate on originals (same criteria): "
+        + ", ".join(f"{j} {v:.0%}" for j, v in report["false_fail_rate"].items())
+    )
+    if report["agreement"]:
+        print("\njudge agreement per criterion (all transcripts):")
+        for c, a in report["agreement"].items():
+            print(f"  {c:<18} agree {a['agree']:.0%}  kappa {a['kappa']:+.2f}")
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="senior-voice-eval", description=__doc__)
     parser.add_argument("--judge-model", default="gpt-6-luna")
@@ -120,16 +203,29 @@ def main(argv: list[str] | None = None) -> None:
     sim.add_argument(
         "--data-dir", default="data", help="persona.json location (falls back to the bundled one)"
     )
+    cj = sub.add_parser(
+        "crossjudge", help="GPT vs Jev judge on GPT- and Claude-written calls + seeded defects"
+    )
+    cj.add_argument("--scenario", action="append", choices=list(BY_ID))
+    cj.add_argument("--reps", type=int, default=2)
+    cj.add_argument("--turns", type=int, default=6)
+    cj.add_argument("--model", default="gpt-6-luna", help="GPT companion")
+    cj.add_argument("--claude-model", default="sonnet", help="Claude companion (via the claude CLI)")
+    cj.add_argument("--senior-model", default="gpt-6-luna")
+    cj.add_argument("--seed", type=int, default=7)
+    cj.add_argument("--no-defects", dest="defects", action="store_false", help="judge originals only")
+    cj.add_argument("--data-dir", default="data")
     tr = sub.add_parser("transcripts", help="judge real call transcripts")
     tr.add_argument("dir")
     args = parser.parse_args(argv)
 
     client = AsyncOpenAI()
-    runner = run_sim if args.command == "sim" else run_transcripts
+    runner = {"sim": run_sim, "transcripts": run_transcripts, "crossjudge": run_crossjudge}[args.command]
     results = asyncio.run(runner(args, client))
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     path = out / f"{dt.datetime.now():%Y%m%d-%H%M%S}-{args.command}.jsonl"
     path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in results))
-    mean = sum(r["score"] for r in results) / len(results) if results else 0
-    print(f"\nmean score {mean:.0%} over {len(results)} cases → {path}")
+    scored = [r for r in results if not r["case"].startswith("_")]
+    mean = sum(r["score"] for r in scored) / len(scored) if scored else 0
+    print(f"\nmean score {mean:.0%} over {len(scored)} cases → {path}")

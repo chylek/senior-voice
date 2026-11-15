@@ -68,3 +68,43 @@ def test_summarize_aggregates_repeated_runs():
     s = summarize(results)
     assert s["a"] == {"runs": 2, "mean": 0.75, "fails": {"validation": 1}, "missing_tools_runs": 1}
     assert s["b"]["fails"] == {"validation": 1, "grounded": 1}
+
+
+def test_seeded_defects_and_kappa():
+    import random
+
+    from senior_voice.evals.crossjudge import DEFECTS, Transcript, analyse, cohen_kappa, seed_defects
+    from senior_voice.evals.rubric import Verdict
+
+    turns = [("Senior", "Haló?")] + [
+        ("Asistentka", f"a{i}") if i % 2 == 0 else ("Senior", f"s{i}") for i in range(8)
+    ]
+    original = Transcript(SCENARIOS[0], "gpt", turns, "ctx")
+    variants = seed_defects(original, random.Random(1))
+    assert len(variants) == len(DEFECTS)
+    for v, (criterion, level, line) in zip(variants, DEFECTS, strict=True):
+        assert (v.defect, v.level) == (criterion, level)
+        changed = [new for new, old in zip(v.turns, turns, strict=True) if new != old]
+        assert len(changed) == 1 and changed[0][0] == "Asistentka" and changed[0][1].startswith(line)
+
+    assert cohen_kappa(["pass", "fail"], ["pass", "fail"]) == 1.0
+    assert cohen_kappa(["pass", "pass", "fail", "fail"], ["pass", "fail", "pass", "fail"]) == 0.0
+
+    ok = {c: {"verdict": "pass"} for c in CRITERIA}
+    for t in [original, *variants]:
+        crit = dict(ok)
+        if t.defect:
+            crit[t.defect] = {"verdict": "fail"}
+        t.verdicts = {"a": Verdict(crit, ""), "b": Verdict(dict(ok) if t.defect else crit, "")}
+    report = analyse([original, *variants], ["a", "b"])
+    assert all(v == 1.0 for v in report["detection"]["a"].values())
+    assert all(v == 0.0 for v in report["detection"]["b"].values())
+    assert report["false_fail_rate"] == {"a": 0.0, "b": 0.0}
+
+
+def test_bootstrap_ci_brackets_the_difference():
+    from senior_voice.evals.crossjudge import bootstrap_ci
+
+    lo, hi = bootstrap_ci([1.0, 0.9, 0.8, 1.0], [0.5, 0.6, 0.4, 0.5])
+    assert 0 < lo < 0.425 < hi
+    assert bootstrap_ci([0.5] * 5, [0.5] * 5) == (0.0, 0.0)
