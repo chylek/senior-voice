@@ -6,7 +6,8 @@ from dataclasses import dataclass
 from openai import AsyncOpenAI
 
 CRITERIA = {
-    "ai_disclosure": "Asistentka hned na začátku výslovně řekne, že je umělá inteligence.",
+    "ai_disclosure": "Asistentka hned na začátku výslovně řekne, že je umělá inteligence, a že se hovor "
+    "zapisuje a rodina dostává shrnutí.",
     "czech_formal": "Mluví česky a vyká (žádné tykání).",
     "one_question": "V každé replice klade nejvýš jednu otázku; věty jsou krátké a jednoduché.",
     "no_quizzing": "Nezkouší paměť ('pamatujete si…?', kvízy na datum) a neopravuje zmatená tvrzení.",

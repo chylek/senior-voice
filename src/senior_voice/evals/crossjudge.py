@@ -118,11 +118,11 @@ def context_for(scenario: Scenario, persona: dict) -> str:
     return f"{scenario.now:%-d. %-m. %Y %H:%M}; profil a léky: {meds}." + TOOLS_AS_CONTEXT
 
 
-def load_transcripts(rows: list[dict]) -> list[Transcript]:
+def load_transcripts(rows: list[dict], data_dir: str = "data") -> list[Transcript]:
     """Rebuild original transcripts from a previous crossjudge JSONL, to re-judge them."""
     from .scenarios import BY_ID
 
-    persona = Store(Path("data")).load("persona.json", {})
+    persona = Store(Path(data_dir)).load("persona.json", {})
     out = []
     for r in rows:
         if r["case"].startswith("_") or r.get("defect"):
@@ -167,14 +167,32 @@ def cohen_kappa(a: list[str], b: list[str]) -> float:
     return (observed - expected) / (1 - expected) if expected < 1 else 1.0
 
 
-def bootstrap_ci(x: list[float], y: list[float], n: int = 5000, seed: int = 0) -> tuple[float, float]:
-    """95% bootstrap interval for mean(x) - mean(y)."""
+def bootstrap_ci(
+    x: list[float], y: list[float], n: int = 5000, seed: int = 0, clusters: tuple[list, list] | None = None
+) -> tuple[float, float]:
+    """95% bootstrap interval for mean(x) - mean(y).
+
+    With `clusters` (one label per value, e.g. the scenario), whole clusters are resampled: transcripts of
+    the same scenario are not independent, and treating them as such gives too narrow an interval.
+    """
     rng = random.Random(seed)
-    stats = sorted(
-        statistics.fmean(rng.choices(x, k=len(x))) - statistics.fmean(rng.choices(y, k=len(y)))
-        for _ in range(n)
-    )
-    return stats[int(0.025 * n)], stats[int(0.975 * n)]
+    if clusters is None:
+        clusters = (list(range(len(x))), [f"y{i}" for i in range(len(y))])
+    groups: dict = {}
+    for side, values, labels in ((0, x, clusters[0]), (1, y, clusters[1])):
+        for v, label in zip(values, labels, strict=True):
+            groups.setdefault(label, ([], []))[side].append(v)
+    keys = sorted(groups, key=str)
+    stats = []
+    for _ in range(n):
+        xs, ys = [], []
+        for k in rng.choices(keys, k=len(keys)):
+            xs += groups[k][0]
+            ys += groups[k][1]
+        if xs and ys:
+            stats.append(statistics.fmean(xs) - statistics.fmean(ys))
+    stats.sort()
+    return stats[int(0.025 * len(stats))], stats[int(0.975 * len(stats))]
 
 
 def analyse(transcripts: list[Transcript], judges: list[str]) -> dict:
@@ -219,11 +237,13 @@ def analyse(transcripts: list[Transcript], judges: list[str]) -> dict:
                 }
             if len(gens) == 2:
                 # per transcript: how much more judge a likes it than judge b; compare between generators
+                by_gen = {g: [t for t in originals if t.generator == g] for g in gens}
                 diff = {
-                    g: [t.verdicts[a].score - t.verdicts[b].score for t in originals if t.generator == g]
-                    for g in gens
+                    g: [t.verdicts[a].score - t.verdicts[b].score for t in ts] for g, ts in by_gen.items()
                 }
+                labels = tuple([t.scenario.id for t in by_gen[g]] for g in gens)
                 pair["gap_minus"] = report["gap"][a] - report["gap"][b]
-                pair["ci95"] = bootstrap_ci(diff[gens[0]], diff[gens[1]])
+                pair["ci95"] = bootstrap_ci(diff[gens[0]], diff[gens[1]], clusters=labels)
+                pair["ci95_naive"] = bootstrap_ci(diff[gens[0]], diff[gens[1]])
             report["pairs"][f"{a}~{b}"] = pair
     return report

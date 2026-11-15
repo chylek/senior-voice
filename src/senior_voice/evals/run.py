@@ -126,7 +126,7 @@ async def run_crossjudge(args, client: AsyncOpenAI) -> list[dict]:
     if args.from_file:
         text = await asyncio.to_thread(Path(args.from_file).read_text)
         rows = [json.loads(line) for line in text.splitlines()]
-        originals = crossjudge.load_transcripts(rows)
+        originals = crossjudge.load_transcripts(rows, args.data_dir)
     else:
         scenarios = [BY_ID[i] for i in args.scenario] if args.scenario else SCENARIOS
         persona = Store(Path(args.data_dir)).load("persona.json", {})

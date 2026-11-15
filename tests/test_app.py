@@ -24,11 +24,11 @@ def signed(body: bytes) -> dict:
     }
 
 
-def incoming(mode: str | None) -> bytes:
+def incoming(mode: str | None, session_id: str = "live_1") -> bytes:
     headers = [{"name": "From", "value": "sip:+420@x"}] + (
         [{"name": "X-Mode", "value": mode}] if mode else []
     )
-    data = {"type": "sip", "session_id": "live_1", "sip_headers": headers}
+    data = {"type": "sip", "session_id": session_id, "sip_headers": headers}
     return json.dumps(
         {"object": "event", "id": "evt_1", "type": "live.transport.incoming", "data": data}
     ).encode()
@@ -46,10 +46,40 @@ def client(tmp_path, monkeypatch, calls):
 def test_signed_incoming_call_is_handled_with_mode(tmp_path, monkeypatch):
     calls = []
     with client(tmp_path, monkeypatch, calls) as c:
-        for mode in ("scheduled", None):
-            body = incoming(mode)
+        for i, mode in enumerate(("scheduled", None)):
+            body = incoming(mode, f"live_{i}")
             assert c.post("/webhook", content=body, headers=signed(body)).status_code == 200
-    assert calls == [("live_1", "scheduled"), ("live_1", "inbound")]
+    assert calls == [("live_0", "scheduled"), ("live_1", "inbound")]
+
+
+def test_retried_webhook_accepts_the_call_once(tmp_path, monkeypatch):
+    calls = []
+    with client(tmp_path, monkeypatch, calls) as c:
+        body = incoming(None)
+        for _ in range(3):
+            assert c.post("/webhook", content=body, headers=signed(body)).status_code == 200
+    assert calls == [("live_1", "inbound")]
+
+
+def test_missing_webhook_secret_refuses_to_start(tmp_path):
+    import pytest
+
+    with pytest.raises(RuntimeError):
+        create_app(Settings(data_dir=tmp_path))
+
+
+def test_no_public_api_docs(tmp_path, monkeypatch):
+    with client(tmp_path, monkeypatch, []) as c:
+        assert c.get("/docs").status_code == 404 and c.get("/openapi.json").status_code == 404
+
+
+async def test_failed_accept_notifies_family_and_keeps_transcript(tmp_path, web, http):
+    companion = Companion(
+        Settings(data_dir=tmp_path, telegram_token="T", telegram_chat="1"), http, openai=None
+    )
+    await companion.handle_call("live_x", "scheduled")  # FakeWeb answers the accept URL with 404
+    assert any("selhal" in t for t in web.sent_telegrams())
+    assert len(list((tmp_path / "calls").glob("*_scheduled.txt"))) == 1
 
 
 def test_unsigned_or_tampered_webhook_is_rejected(tmp_path, monkeypatch):

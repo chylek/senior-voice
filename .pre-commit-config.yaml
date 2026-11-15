@@ -8,18 +8,22 @@ repos:
       - id: check-toml
       - id: check-json
       - id: check-added-large-files
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.8.6
-    hooks:
-      - id: ruff
-        args: [--fix]
-      - id: ruff-format
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.24.3
     hooks:
       - id: gitleaks
   - repo: local
-    hooks:
+    hooks:  # ruff from uv.lock, so pre-commit and CI can't drift to different versions
+      - id: ruff
+        name: ruff
+        entry: uv run ruff check --fix
+        language: system
+        types: [python]
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format
+        language: system
+        types: [python]
       - id: pytest
         name: pytest
         entry: uv run pytest -q

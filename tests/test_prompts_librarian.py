@@ -40,14 +40,29 @@ async def test_update_memory_pops_summary_and_keeps_live_notes():
     assert summary == "Byla smutná."
     assert memory["open_topics"] == ["Gott"] and "call_summary" not in memory
     assert memory["live_notes"] == MEMORY["live_notes"]
+    assert memory["call_flags"] == []
     request = responses.calls[0]
     assert "json" in request["input"]  # required by the json_object response format
     assert request["text"] == {"format": {"type": "json_object"}}
 
 
 def test_report_lists_flags_and_topics():
-    memory = {"flags": ["smutek"], "sensitive_topics": [{"date": "d", "topic": "t"}], "mood_trend": "smutná"}
+    memory = {
+        "flags": ["stará bolest na hrudi"],
+        "call_flags": ["smutek"],
+        "sensitive_topics": [{"date": "d", "topic": "t"}],
+        "mood_trend": "smutná",
+    }
     text = librarian.report("15. 11. 08:24, plánovaný, 117 s", "Shrnutí.", memory)
     assert text.startswith("📞 Hovor s Aničkou (15. 11. 08:24, plánovaný, 117 s)\n\nShrnutí.")
     assert "• smutek" in text and "• d – t" in text and "Otevřená témata" not in text
+    assert "stará bolest" not in text  # durable flags are not re-reported as this call's signals
     assert text.endswith("Nálada: smutná")
+
+
+async def test_update_memory_rejects_malformed_output():
+    import pytest
+
+    client = SimpleNamespace(responses=FakeResponses({"open_topics": "not a list"}))
+    with pytest.raises(ValueError):
+        await librarian.update_memory(client, "m", MEMORY, "x", dt.date(2026, 11, 15))

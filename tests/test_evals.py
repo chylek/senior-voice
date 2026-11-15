@@ -123,3 +123,15 @@ def test_load_transcripts_round_trip():
     (t,) = load_transcripts(rows)
     assert t.turns == [("Senior", "Haló?"), ("Asistentka", "Dobrý den,\npaní Marie."), ("Senior", "Ahoj")]
     assert t.generator == "claude" and "Atoris" in t.context
+
+
+def test_cluster_bootstrap_is_wider_than_naive():
+    from senior_voice.evals.crossjudge import bootstrap_ci
+
+    # two clusters that disagree strongly: resampling clusters must widen the interval
+    x = [1.0] * 10 + [0.0] * 10
+    y = [0.5] * 20
+    labels = (["a"] * 10 + ["b"] * 10, ["a"] * 10 + ["b"] * 10)
+    naive = bootstrap_ci(x, y)
+    clustered = bootstrap_ci(x, y, clusters=labels)
+    assert clustered[1] - clustered[0] > naive[1] - naive[0]

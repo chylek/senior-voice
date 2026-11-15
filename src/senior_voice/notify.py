@@ -33,5 +33,6 @@ class Telegram:
                 f"https://api.telegram.org/bot{self.token}/sendMessage",
                 data={"chat_id": self.chat_id, "text": part},
             )
-            r.raise_for_status()
+            if r.is_error:  # not raise_for_status(): its message contains the URL, i.e. the bot token
+                raise RuntimeError(f"Telegram HTTP {r.status_code}")
         return True
