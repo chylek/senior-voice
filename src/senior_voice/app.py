@@ -107,6 +107,8 @@ def create_app(
     settings: Settings | None = None, transport: httpx.AsyncBaseTransport | None = None
 ) -> FastAPI:
     settings = settings or Settings.from_env()
+    if not logging.getLogger().handlers:  # uvicorn configures only its own loggers
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     state: dict[str, Companion] = {}
 
     @asynccontextmanager
@@ -149,7 +151,6 @@ def create_app(
 def main() -> None:  # pragma: no cover - entry point for local runs
     import uvicorn
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     uvicorn.run(create_app(), host="0.0.0.0", port=8790)
 
 
