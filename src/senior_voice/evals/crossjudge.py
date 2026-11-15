@@ -13,15 +13,18 @@ more than Jev does on the very same transcripts.
 """
 
 import asyncio
+import json
 import random
 import re
 import statistics
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from openai import AsyncOpenAI
 
 from .. import prompts
-from .rubric import CRITERIA, Verdict
+from ..store import Store
+from .rubric import CRITERIA, JUDGE, Verdict, judge_input, verdict_from
 from .scenarios import Scenario
 from .simulate import STUB_OUTPUTS
 
@@ -69,9 +72,19 @@ class GptGenerator:
         return r.output_text.strip()
 
 
-class ClaudeGenerator:
-    """Uses the Claude Code CLI in print mode, so no separate Anthropic API key is needed."""
+async def claude_cli(model: str, system: str, prompt: str) -> str:
+    """One `claude -p` call (Claude Code CLI in print mode, no tools): no separate Anthropic key needed."""
+    proc = await asyncio.create_subprocess_exec(
+        "claude", "-p", "--model", model, "--tools", "", "--system-prompt", system, prompt,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, cwd="/tmp",
+    )  # fmt: skip
+    out, err = await proc.communicate()
+    if proc.returncode:
+        raise RuntimeError(f"claude -p failed ({proc.returncode}): {(err or out).decode()[:300]}")
+    return out.decode().strip()
 
+
+class ClaudeGenerator:
     def __init__(self, model: str = "sonnet", concurrency: int = 6):
         self.model, self.name = model, "claude"
         self._limit = asyncio.Semaphore(concurrency)
@@ -80,14 +93,45 @@ class ClaudeGenerator:
         history = "\n".join(f"{who}: {said}" for who, said in turns)
         prompt = f"Dosavadní hovor:\n{history}\n\nNapiš jen další repliku za roli „{speaker}“, bez jmenovky."
         async with self._limit:
-            proc = await asyncio.create_subprocess_exec(
-                "claude", "-p", "--model", self.model, "--tools", "", "--system-prompt", instructions, prompt,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, cwd="/tmp",
-            )  # fmt: skip
-            out, err = await proc.communicate()
-        if proc.returncode:
-            raise RuntimeError(f"claude -p failed: {err.decode()[:300]}")
-        return re.sub(rf"^{speaker}:\s*", "", out.decode().strip())
+            out = await claude_cli(self.model, instructions, prompt)
+        return re.sub(rf"^{speaker}:\s*", "", out)
+
+
+class ClaudeJudge:
+    """The same rubric and judge prompt as the GPT judge, answered by Claude."""
+
+    name = "claude"
+
+    def __init__(self, model: str = "sonnet", concurrency: int = 6):
+        self.model = model
+        self._limit = asyncio.Semaphore(concurrency)
+
+    async def __call__(self, transcript: str, focus: str = "", context: str = "") -> Verdict:
+        async with self._limit:
+            out = await claude_cli(self.model, JUDGE, judge_input(transcript, focus, context))
+        data = json.loads(out[out.index("{") : out.rindex("}") + 1])
+        return verdict_from(data)
+
+
+def context_for(scenario: Scenario, persona: dict) -> str:
+    meds = ", ".join(f"{m['název']} {m['kdy']}" for m in persona.get("person", {}).get("léky", []))
+    return f"{scenario.now:%-d. %-m. %Y %H:%M}; profil a léky: {meds}." + TOOLS_AS_CONTEXT
+
+
+def load_transcripts(rows: list[dict]) -> list[Transcript]:
+    """Rebuild original transcripts from a previous crossjudge JSONL, to re-judge them."""
+    from .scenarios import BY_ID
+
+    persona = Store(Path("data")).load("persona.json", {})
+    out = []
+    for r in rows:
+        if r["case"].startswith("_") or r.get("defect"):
+            continue
+        scenario = BY_ID[r["case"]]
+        parts = re.split(r"^(Senior|Asistentka): ", r["transcript"], flags=re.M)[1:]
+        turns = [(parts[i], parts[i + 1].strip()) for i in range(0, len(parts), 2)]
+        out.append(Transcript(scenario, r["generator"], turns, context_for(scenario, persona)))
+    return out
 
 
 async def converse(companion, senior, scenario: Scenario, persona: dict, turns: int) -> Transcript:
@@ -95,8 +139,7 @@ async def converse(companion, senior, scenario: Scenario, persona: dict, turns: 
         prompts.companion(persona, {}, scenario.now, STUB_OUTPUTS["get_weather"], scenario.mode)
         + TOOLS_AS_CONTEXT
     )
-    meds = ", ".join(f"{m['název']} {m['kdy']}" for m in persona.get("person", {}).get("léky", []))
-    context = f"{scenario.now:%-d. %-m. %Y %H:%M}; profil a léky: {meds}." + TOOLS_AS_CONTEXT
+    context = context_for(scenario, persona)
     history: list[tuple[str, str]] = [("Senior", "Haló?")]
     for _ in range(turns):
         history.append(("Asistentka", await companion.reply(instructions, history, "Asistentka")))
@@ -137,7 +180,7 @@ def bootstrap_ci(x: list[float], y: list[float], n: int = 5000, seed: int = 0) -
 def analyse(transcripts: list[Transcript], judges: list[str]) -> dict:
     originals = [t for t in transcripts if not t.defect]
     seeded = [t for t in transcripts if t.defect]
-    report: dict = {"scores": {}, "detection": {}, "false_fail_rate": {}, "agreement": {}}
+    report: dict = {"scores": {}, "detection": {}, "false_fail_rate": {}}
     for j in judges:
         report["scores"][j] = {
             g: statistics.mean(t.verdicts[j].score for t in originals if t.generator == g)
@@ -159,27 +202,28 @@ def analyse(transcripts: list[Transcript], judges: list[str]) -> dict:
         report["false_fail_rate"][j] = statistics.fmean(
             t.verdicts[j].criteria[c]["verdict"] == "fail" for t in originals for c in CRITERIA_SEEDED
         )
-    if len(judges) == 2:
-        a, b = judges
-        for c in CRITERIA:
-            va = [t.verdicts[a].criteria[c]["verdict"] for t in transcripts]
-            vb = [t.verdicts[b].criteria[c]["verdict"] for t in transcripts]
-            report["agreement"][c] = {
-                "agree": sum(x == y for x, y in zip(va, vb, strict=True)) / len(va),
-                "kappa": cohen_kappa(va, vb),
-            }
-        gens = sorted(report["scores"][a])
-        if len(gens) == 2:
-            gap = {j: report["scores"][j][gens[0]] - report["scores"][j][gens[1]] for j in judges}
-            # per transcript: how much more judge a likes it than judge b; compare that between generators
-            diff = {
-                g: [t.verdicts[a].score - t.verdicts[b].score for t in originals if t.generator == g]
-                for g in gens
-            }
-            report["self_preference"] = {
-                "gap": gap,
-                "gap_minus": gap[a] - gap[b],
-                "order": gens,
-                "ci95": bootstrap_ci(diff[gens[0]], diff[gens[1]]),
-            }
+    gens = sorted({t.generator for t in originals})
+    if len(gens) == 2:
+        report["gap"] = {j: report["scores"][j][gens[0]] - report["scores"][j][gens[1]] for j in judges}
+        report["gap_order"] = gens
+    report["pairs"] = {}
+    for i, a in enumerate(judges):
+        for b in judges[i + 1 :]:
+            pair: dict = {"agreement": {}}
+            for c in CRITERIA:
+                va = [t.verdicts[a].criteria[c]["verdict"] for t in transcripts]
+                vb = [t.verdicts[b].criteria[c]["verdict"] for t in transcripts]
+                pair["agreement"][c] = {
+                    "agree": sum(x == y for x, y in zip(va, vb, strict=True)) / len(va),
+                    "kappa": cohen_kappa(va, vb),
+                }
+            if len(gens) == 2:
+                # per transcript: how much more judge a likes it than judge b; compare between generators
+                diff = {
+                    g: [t.verdicts[a].score - t.verdicts[b].score for t in originals if t.generator == g]
+                    for g in gens
+                }
+                pair["gap_minus"] = report["gap"][a] - report["gap"][b]
+                pair["ci95"] = bootstrap_ci(diff[gens[0]], diff[gens[1]])
+            report["pairs"][f"{a}~{b}"] = pair
     return report

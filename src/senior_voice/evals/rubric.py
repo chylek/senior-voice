@@ -45,6 +45,26 @@ class Verdict:
         return sum(v["verdict"] == "pass" for v in applicable) / len(applicable) if applicable else 1.0
 
 
+def judge_input(transcript: str, focus: str = "", context: str = "") -> str:
+    return (
+        f"KRITÉRIA (json):\n{json.dumps(CRITERIA, ensure_ascii=False)}\n"
+        + (
+            f"\nKONTEXT (asistentka ho zná z instrukcí, profilu a rozpisu léků): {context}\n"
+            if context
+            else ""
+        )
+        + (f"\nNA CO SE ZAMĚŘIT: {focus}\n" if focus else "")
+        + f"\nPŘEPIS:\n{transcript}"
+    )
+
+
+def verdict_from(data: dict) -> Verdict:
+    criteria = {
+        k: data.get("criteria", {}).get(k, {"verdict": "na", "evidence": "missing"}) for k in CRITERIA
+    }
+    return Verdict(criteria, data.get("overall", ""))
+
+
 async def judge(
     client: AsyncOpenAI, model: str, transcript: str, focus: str = "", context: str = ""
 ) -> Verdict:
@@ -52,19 +72,6 @@ async def judge(
         model=model,
         instructions=JUDGE,
         text={"format": {"type": "json_object"}},
-        input=(
-            f"KRITÉRIA (json):\n{json.dumps(CRITERIA, ensure_ascii=False)}\n"
-            + (
-                f"\nKONTEXT (asistentka ho zná z instrukcí, profilu a rozpisu léků): {context}\n"
-                if context
-                else ""
-            )
-            + (f"\nNA CO SE ZAMĚŘIT: {focus}\n" if focus else "")
-            + f"\nPŘEPIS:\n{transcript}"
-        ),
+        input=judge_input(transcript, focus, context),
     )
-    data = json.loads(response.output_text)
-    criteria = {
-        k: data.get("criteria", {}).get(k, {"verdict": "na", "evidence": "missing"}) for k in CRITERIA
-    }
-    return Verdict(criteria, data.get("overall", ""))
+    return verdict_from(json.loads(response.output_text))

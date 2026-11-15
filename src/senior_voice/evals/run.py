@@ -123,24 +123,36 @@ class GptJudge:
 
 
 async def run_crossjudge(args, client: AsyncOpenAI) -> list[dict]:
-    scenarios = [BY_ID[i] for i in args.scenario] if args.scenario else SCENARIOS
-    persona = Store(Path(args.data_dir)).load("persona.json", {})
-    senior = crossjudge.GptGenerator(client, args.senior_model)
-    generators = [crossjudge.GptGenerator(client, args.model), crossjudge.ClaudeGenerator(args.claude_model)]
-    originals = await asyncio.gather(
-        *(
-            crossjudge.converse(g, senior, s, persona, args.turns)
-            for g in generators
-            for s in scenarios
-            for _ in range(args.reps)
+    if args.from_file:
+        text = await asyncio.to_thread(Path(args.from_file).read_text)
+        rows = [json.loads(line) for line in text.splitlines()]
+        originals = crossjudge.load_transcripts(rows)
+    else:
+        scenarios = [BY_ID[i] for i in args.scenario] if args.scenario else SCENARIOS
+        persona = Store(Path(args.data_dir)).load("persona.json", {})
+        senior = crossjudge.GptGenerator(client, args.senior_model)
+        generators = [
+            crossjudge.GptGenerator(client, args.model),
+            crossjudge.ClaudeGenerator(args.claude_model),
+        ]
+        originals = await asyncio.gather(
+            *(
+                crossjudge.converse(g, senior, s, persona, args.turns)
+                for g in generators
+                for s in scenarios
+                for _ in range(args.reps)
+            )
         )
-    )
     rng = random.Random(args.seed)
-    transcripts = [
-        v for t in originals for v in (t, *(crossjudge.seed_defects(t, rng) if args.defects else ()))
-    ]
+    seeded = [v for t in originals for v in crossjudge.seed_defects(t, rng)] if args.defects else []
+    transcripts = [*originals, *seeded]
     async with httpx.AsyncClient(timeout=60) as http:
-        judges = [GptJudge(client, args.judge_model), JevJudge(http, os.environ["JEV_API_KEY"])]
+        available = {
+            "gpt": lambda: GptJudge(client, args.judge_model),
+            "jev": lambda: JevJudge(http, os.environ["JEV_API_KEY"]),
+            "claude": lambda: crossjudge.ClaudeJudge(args.claude_model),
+        }
+        judges = [available[name]() for name in args.judges.split(",")]
         limit = asyncio.Semaphore(32)
 
         async def score(t, j):
@@ -149,12 +161,13 @@ async def run_crossjudge(args, client: AsyncOpenAI) -> list[dict]:
 
         await asyncio.gather(*(score(t, j) for t in transcripts for j in judges))
     report = crossjudge.analyse(transcripts, [j.name for j in judges])
-    print_report(report, len(originals), len(transcripts) - len(originals))
+    print_report(report, len(originals), len(seeded))
     return [
         {
             "case": t.scenario.id,
             "generator": t.generator,
             "defect": t.defect,
+            "level": t.level,
             "transcript": t.text,
             "verdicts": {j: v.criteria for j, v in t.verdicts.items()},
             "score": statistics.mean(v.score for v in t.verdicts.values()),
@@ -167,12 +180,14 @@ def print_report(report: dict, n_orig: int, n_seeded: int) -> None:
     print(f"{n_orig} original transcripts, {n_seeded} with one seeded defect\n")
     print("mean rubric score on originals (judge × generator):")
     for j, by_gen in report["scores"].items():
-        print(f"  {j:<6}" + "  ".join(f"{g} {v:.0%}" for g, v in by_gen.items()))
-    if sp := report.get("self_preference"):
-        a, b = sp["order"]
-        print(f"  {a} − {b} gap: " + ", ".join(f"{j} {v:+.1%}" for j, v in sp["gap"].items()))
-        lo, hi = sp["ci95"]
-        print(f"  difference of gaps {sp['gap_minus']:+.1%} (95% bootstrap CI {lo:+.1%} … {hi:+.1%})")
+        gap = f"   {' − '.join(report['gap_order'])} {report['gap'][j]:+.1%}" if "gap" in report else ""
+        print(f"  {j:<7}" + "  ".join(f"{g} {v:.0%}" for g, v in by_gen.items()) + gap)
+    for pair, p in report["pairs"].items():
+        if "ci95" in p:
+            lo, hi = p["ci95"]
+            print(
+                f"  gap difference {pair:<12} {p['gap_minus']:+.1%}  (95% bootstrap CI {lo:+.1%} … {hi:+.1%})"
+            )
     judges = list(report["detection"])
     if report["detection"][judges[0]]:
         print("\nseeded defect detected (judge said fail on that criterion):")
@@ -183,10 +198,11 @@ def print_report(report: dict, n_orig: int, n_seeded: int) -> None:
         "false fail rate on originals (same criteria): "
         + ", ".join(f"{j} {v:.0%}" for j, v in report["false_fail_rate"].items())
     )
-    if report["agreement"]:
-        print("\njudge agreement per criterion (all transcripts):")
-        for c, a in report["agreement"].items():
-            print(f"  {c:<18} agree {a['agree']:.0%}  kappa {a['kappa']:+.2f}")
+    print("\njudge agreement, Cohen's kappa per criterion:")
+    pairs = list(report["pairs"])
+    print(f"  {'criterion':<18}" + "".join(f"{p:>14}" for p in pairs))
+    for c in CRITERIA:
+        print(f"  {c:<18}" + "".join(f"{report['pairs'][p]['agreement'][c]['kappa']:>+14.2f}" for p in pairs))
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -214,6 +230,8 @@ def main(argv: list[str] | None = None) -> None:
     cj.add_argument("--senior-model", default="gpt-6-luna")
     cj.add_argument("--seed", type=int, default=7)
     cj.add_argument("--no-defects", dest="defects", action="store_false", help="judge originals only")
+    cj.add_argument("--judges", default="gpt,jev", help="comma list of gpt, jev, claude")
+    cj.add_argument("--from", dest="from_file", help="re-judge the originals of a previous crossjudge JSONL")
     cj.add_argument("--data-dir", default="data")
     tr = sub.add_parser("transcripts", help="judge real call transcripts")
     tr.add_argument("dir")

@@ -97,6 +97,7 @@ def test_seeded_defects_and_kappa():
             crit[t.defect] = {"verdict": "fail"}
         t.verdicts = {"a": Verdict(crit, ""), "b": Verdict(dict(ok) if t.defect else crit, "")}
     report = analyse([original, *variants], ["a", "b"])
+    assert set(report["pairs"]) == {"a~b"}
     assert all(v == 1.0 for v in report["detection"]["a"].values())
     assert all(v == 0.0 for v in report["detection"]["b"].values())
     assert report["false_fail_rate"] == {"a": 0.0, "b": 0.0}
@@ -108,3 +109,17 @@ def test_bootstrap_ci_brackets_the_difference():
     lo, hi = bootstrap_ci([1.0, 0.9, 0.8, 1.0], [0.5, 0.6, 0.4, 0.5])
     assert 0 < lo < 0.425 < hi
     assert bootstrap_ci([0.5] * 5, [0.5] * 5) == (0.0, 0.0)
+
+
+def test_load_transcripts_round_trip():
+    from senior_voice.evals.crossjudge import load_transcripts
+
+    text = "Senior: Haló?\nAsistentka: Dobrý den,\npaní Marie.\nSenior: Ahoj"
+    rows = [
+        {"case": "lonely_sad", "generator": "claude", "defect": "", "transcript": text},
+        {"case": "lonely_sad", "generator": "claude", "defect": "no_quizzing", "transcript": text},
+        {"case": "_report"},
+    ]
+    (t,) = load_transcripts(rows)
+    assert t.turns == [("Senior", "Haló?"), ("Asistentka", "Dobrý den,\npaní Marie."), ("Senior", "Ahoj")]
+    assert t.generator == "claude" and "Atoris" in t.context

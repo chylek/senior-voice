@@ -109,42 +109,55 @@ advice, and facts from the persona profile count as grounded.
 
 ### Does a GPT judge prefer GPT-written conversations?
 
-`senior-voice-eval crossjudge` tests for self-preference.
+`senior-voice-eval crossjudge` tests for self-preference with a crossed design.
 
 - **Generators.** Companions from two model families play the same scenarios against the same simulated
   senior: `gpt-6-luna`, and Claude Sonnet via the `claude` CLI. Tool results go into the instructions, so
   both get identical information.
-- **Judges.** Two judges score every transcript: the GPT LLM judge and **TypeSafe Jev**
-  ([`evals/jev.py`](src/senior_voice/evals/jev.py)). Jev is a non-generative judgment model; each
-  criterion is one Noul, plus an applicability Noul where a criterion may not apply.
-- **Seeded defects.** Optionally, each transcript is also copied with one rubric violation inserted
-  (blatant and subtle variants). That gives ground truth, so judges are scored on detection, not only on
+- **Judges.** Three judges score every transcript (`--judges gpt,jev,claude`):
+  - the GPT LLM judge;
+  - Claude with the identical judge prompt and rubric;
+  - **TypeSafe Jev** ([`evals/jev.py`](src/senior_voice/evals/jev.py)). Jev is a non-generative judgment
+    model: each criterion is one Noul, plus an applicability Noul where a criterion may not apply. It is
+    the family-neutral reference.
+- **Seeded defects** (optional). Each transcript is also copied with one rubric violation inserted, in a
+  blatant and a subtle variant. That gives ground truth, so judges are scored on detection, not only on
   agreement with each other.
+- **Re-judging.** `--from <jsonl>` re-scores saved transcripts with other judges.
 
-Results from 2026-11-15:
+Results from 2026-11-15, 36 GPT-written and 36 Claude-written calls:
 
-| | GPT judge | Jev |
-|---|---|---|
-| score on GPT-written calls (n=36) | 95% | 92% |
-| score on Claude-written calls (n=36) | 88% | 90% |
-| Claude − GPT gap | **−7.0 pp** | −1.7 pp |
-| subtle defects caught (n=24 each) | 100% on all 4 | 29–79% |
-| blatant defects caught | 100% | 96–100% |
-| false fails on originals | 4% | 9% |
+| judge | GPT-written | Claude-written | Claude − GPT |
+|---|---|---|---|
+| GPT | 96% | 90% | **−5.6 pp** |
+| Claude | 92% | 91% | −1.0 pp |
+| Jev | 92% | 91% | −0.8 pp |
 
-The GPT judge marks Claude's calls down 5.3 pp more than Jev does on the very same transcripts
-(95% bootstrap CI −11.6 … +0.8 pp). That points to self-preference but falls just short of significance
-at this sample size. Most of the gap is the `one_question` criterion, where the two judges barely agree
-(κ ≈ 0.1).
+- **The GPT judge favours GPT-written calls.** On the same transcripts it penalises Claude's calls by
+  4.6 pp more than the Claude judge does (95% bootstrap CI −8.9 … −0.3), and 4.8 pp more than Jev
+  (CI −11.2 … +1.5).
+- **The Claude judge shows no matching preference** for Claude's calls; it lands where neutral Jev does.
+- Most of the GPT judge's extra penalty sits in `one_question` (7 fails on Claude-written calls vs 1 on
+  GPT-written) and `grounded` (5 vs 0). The Claude judge also flags `grounded` on 3 Claude-written calls,
+  so part of that is real.
+- **Practical takeaway:** don't let one model family both generate and grade. Use a cross-family judge,
+  or report two judges.
+
+Detection of seeded defects (n=24 per cell, GPT vs Jev):
+
+- The GPT judge caught every blatant and subtle defect.
+- Jev caught 96–100% of blatant defects but only 29–79% of subtle ones; the subtle informal-address and
+  memory-quiz lines were hardest.
+- False fails on clean transcripts: 4–5% for the LLM judges, 8–9% for Jev.
+
+Kappa is low on `validation` and `no_quizzing` even though raw agreement is high: nearly every transcript
+passes, and kappa punishes such skewed labels.
 
 Caveats:
 - Jev is not ground truth either.
-- The simulated senior is also a GPT model.
-- Seeded defects are short inserted sentences, which is easier than real failures.
-
-The GPT judge is the more sensitive detector here. Jev costs a fraction and returns calibrated
-probabilities, but in this setup it misses subtle Czech-register and memory-quiz violations. The fully
-crossed design, adding a Claude judge so each family judges both, is the natural next step.
+- The simulated senior is a GPT model. That affects all three judges equally, so it cancels out of the
+  gap differences.
+- Seeded defects are short inserted sentences, which are easier to spot than real failures.
 
 ## Cost
 
