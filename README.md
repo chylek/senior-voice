@@ -131,7 +131,11 @@ Then:
 2. **Webhook.** In the OpenAI dashboard, add a project webhook for `live.transport.incoming` pointing at
    `https://<your-host>/webhook` on **port 443**; OpenAI did not deliver to a custom port. Put its
    `whsec_…` secret into `OPENAI_WEBHOOK_SECRET`. Unsigned requests get a 400.
-3. **Scheduled calls.** Run [`deploy/call-now.sh`](deploy/call-now.sh) `<number>` from cron.
+3. **Who reaches the AI.** `AI_CALLERS` in `extensions.conf` lists the callers' last 9 digits. Anyone else
+   just "rings" on the Asterisk leg, so a parallel voicemail branch on the provider side (Odorik
+   `*0851XX*YY` with a delay of a few seconds) picks the call up. Whitelisted callers are answered at once,
+   which cancels voicemail.
+4. **Scheduled calls.** Run [`deploy/call-now.sh`](deploy/call-now.sh) `<number>` from cron.
 
 Docker: `docker build -t senior-voice .` and mount a volume at `/data` (memory, transcripts, logs; drop a
 custom `persona.json` there).
