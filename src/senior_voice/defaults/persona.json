@@ -1,0 +1,28 @@
+{
+  "assistant_name": "Anička",
+  "city": "Plzeň",
+  "lat": 49.7475,
+  "lon": 13.3776,
+  "person": {
+    "name": "Marie Nováková (fiktivní demo persona)",
+    "oslovení": "paní Marie",
+    "věk": 81,
+    "bydlí": "sama v bytě v Plzni na Slovanech, 3. patro s výtahem",
+    "rodina": {
+      "manžel": "Josef, zemřel před 6 lety (citlivé téma, jen když ho otevře sama)",
+      "dcera": "Jana (54), bydlí v Praze, volá v neděli",
+      "syn": "Petr (50), Plzeň, chodí na nákup ve středu",
+      "vnoučata": ["Tomáš (24) studuje v Brně", "Klárka (12), chodí na balet"]
+    },
+    "dříve": "35 let učitelka na 1. stupni ZŠ, ráda vzpomíná na školní výlety",
+    "záliby": ["zahrádka na chatě v Bolevci", "pletení", "dechovka a Karel Gott", "křížovky", "seriál Most!"],
+    "zdraví": "mírná kognitivní porucha, vysoký tlak, štítná žláza; chodí o holi",
+    "léky": [
+      {"název": "Euthyrox 50", "kdy": "ráno nalačno v 6:30"},
+      {"název": "Prestarium 5 mg", "kdy": "ráno po snídani"},
+      {"název": "Godasal 100", "kdy": "v poledne"},
+      {"název": "Atoris 20 mg", "kdy": "večer"}
+    ],
+    "rutina": "vstává v 6, odpoledne spí, večer TV, spát chodí ve 22"
+  }
+}
