@@ -16,6 +16,8 @@ class Settings:
     webhook_secret: str = ""
     telegram_token: str = ""
     telegram_chat: str = ""
+    jev_api_key: str = ""  # TypeSafe Jev, for the sidecar guard
+    guard: bool = True  # sidecar guard: OpenAI moderation + Jev on every senior turn
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -31,4 +33,6 @@ class Settings:
             webhook_secret=env("OPENAI_WEBHOOK_SECRET", ""),
             telegram_token=env("TELEGRAM_BOT_TOKEN", ""),
             telegram_chat=env("TELEGRAM_CHAT_ID", ""),
+            jev_api_key=env("JEV_API_KEY", ""),
+            guard=env("GUARD", "1") != "0",
         )

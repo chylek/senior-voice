@@ -90,6 +90,7 @@ What a real deployment would process, and what this demo does about it:
 | memory: topics, quotes, mood, flags | `DATA_DIR/memory.json`, dated copies in `history/` | **unbounded** | OpenAI (next call's instructions) |
 | medication log | `DATA_DIR/med_log.json` | **unbounded** | — |
 | family summaries and alerts | Telegram chat | Telegram's | Telegram (bot chats are not end-to-end encrypted) |
+| each senior turn (text) | not stored by the guard | — | TypeSafe (Jev) and OpenAI moderation |
 
 Before using this with a real person you would need:
 - a legal basis for health data (GDPR Art. 9), consent that accounts for the person's capacity, and a
@@ -107,6 +108,54 @@ Security notes:
   can persist or forward (`remember`, `escalate`) is length-capped.
 - Webhooks are signature-checked, deduplicated per session, and the service refuses to start without a
   secret.
+
+## Guardrails: a sidecar, not a filter
+
+GPT-Live speaks to the caller directly; the audio never passes through this service, so nothing can be
+blocked before it is said. What the backend does see is the transcript on the sideband, and it can act
+on it within about a second. [`guard.py`](src/senior_voice/guard.py) does that:
+
+- **Every finished senior turn is checked by two independent detectors, in parallel, off the call's
+  critical path:**
+  - **TypeSafe Jev**: three Nouls over the latest turn plus recent context. One asks about an acute
+    medical warning sign, one about thoughts of death or self-harm, and one about someone trying to get
+    money, passwords or card details.
+  - **OpenAI moderation** (`omni-moderation-latest`): its self-harm categories. It runs on the same
+    processor as the call, so there is no extra data transfer.
+- **Code owns the policy:**
+  - a 0.7 threshold;
+  - each category acts at most once per call;
+  - a hit sends a Telegram alert through `escalate`;
+  - a hit appends an instruction to the live session (`session.instructions.append`), e.g. "tell them to
+    call 155 now".
+  - This is the deterministic backstop for when the voice model itself doesn't call `escalate`.
+- **Web tool output (news, TV listings) is screened** by a Jev Noul for text aimed at an AI assistant,
+  and withheld if it hits.
+- **No Google Model Armor or similar.** It would add a third processor of health data and would see only
+  text anyway.
+
+`senior-voice-eval guard` measures it on hand-labelled Czech utterances. The labels include near misses:
+sadness, chronic pain, a retold TV murder, paying a bill. Results from 2026-11-16:
+
+| | Jev | OpenAI moderation | combined |
+|---|---|---|---|
+| acute, P / R (dev n=32) | 100% / 100% | — / 0% | 100% / 100% |
+| self-harm | 100% / 100% | 100% / 40% | 100% / 100% |
+| scam | 100% / 100% | — / 0% | 100% / 100% |
+| same on held-out (n=12) | all 100% / 100% | self-harm R 0% | all 100% / 100% |
+| latency p50 / p95 | ~350 / 400 ms | ~400 / 750 ms | parallel |
+| injection screen | 6/6 | | |
+
+- The first run found two problems, which are now fixed:
+  - Jev missed fainting, "can't get up" and passive death wishes ("nechci už tady být");
+  - moderation's `violence` category fired on a senior retelling a TV crime show, so it is no longer
+    mapped.
+- The Jev questions were then tuned on the dev set. The held-out set was written at the same time but
+  first run only after the questions were frozen.
+- 44 short utterances are a smoke test, not a benchmark. Real speech-to-text errors, dialect and long
+  rambling turns are untested.
+- Moderation adds little for Czech: self-harm recall is 40% on dev and 0% on held-out. It stays as an
+  independent second opinion on the one category it covers.
 
 ## Evaluation
 
@@ -266,6 +315,8 @@ custom `persona.json` there).
 | `VOICE` | `marin` | |
 | `DATA_DIR` | `/data` | |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | | alerts and call reports |
+| `JEV_API_KEY` | | TypeSafe Jev for the sidecar guard (moderation uses the OpenAI key) |
+| `GUARD` | `1` | `0` turns the sidecar guard off |
 
 ## Development
 
@@ -282,7 +333,8 @@ runs against a scripted fake client.
 ```
 src/senior_voice/
   app.py        webhook, accept, call lifecycle
-  sideband.py   GPT-Live sideband events → transcript, tool calls
+  sideband.py   GPT-Live sideband events → transcript, tool calls, guard hook
+  guard.py      sidecar guardrails: Jev + OpenAI moderation per senior turn
   tools.py      function tools + JSON schemas
   prompts.py    conversation guide, backend and librarian prompts
   librarian.py  post-call memory update and family report
@@ -298,8 +350,8 @@ telephony/asterisk/   PBX config for SIP provider ↔ OpenAI
 - TLS to `sip.api.openai.com` is not verified. Asterisk 20's bundled pjproject rejects OpenAI's valid
   wildcard certificate; media is still SRTP. See the comment in `pjsip.conf`.
 - Escalation has one channel (Telegram) with no acknowledgement or second step. A real deployment needs
-  an escalation ladder: alert, then call a family member, and a deterministic red-flag check over the
-  transcript in case the model doesn't call the tool.
+  an escalation ladder: alert first, then call a family member. The sidecar guard covers the case where
+  the model doesn't call `escalate`, but not the case where nobody reads the alert.
 - Single process: per-session webhook dedupe and the memory lock live in memory, and an in-flight call is
   lost on restart.
 - The model waits for the callee to speak first. That is fine on the phone: in scheduled mode the senior

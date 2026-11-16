@@ -28,6 +28,7 @@ TV_CHANNELS = {"ČT1": 1, "ČT2": 2, "Nova": 3, "Prima": 4, "ČT24": 24}
 DAYS = {"dnes": 0, "zítra": 1, "pozítří": 2}
 TV_WINDOWS = {"odpoledne": (12, 18), "večer": (18, 24)}
 NOTE_LIMIT = 300  # caps text that the conversation can persist or forward
+WEB_TOOLS = {"get_news", "get_tv"}  # third-party text that is screened for prompt injection
 ALERT_FOOTER = "Text shrnula AI z hovoru. Asistentka nikdy nežádá peníze, hesla ani platby."
 
 # WMO weather interpretation codes used by Open-Meteo
@@ -124,10 +125,17 @@ def _local(iso: str) -> dt.datetime:
 
 class Toolbox:
     def __init__(
-        self, http: httpx.AsyncClient, store: Store, telegram: Telegram, now=dt.datetime.now, memory_lock=None
+        self,
+        http: httpx.AsyncClient,
+        store: Store,
+        telegram: Telegram,
+        now=dt.datetime.now,
+        memory_lock=None,
+        screen: Callable[[str], Awaitable[bool]] | None = None,
     ):
         self.http, self.store, self.telegram, self.now = http, store, telegram, now
         self.memory_lock = memory_lock or asyncio.Lock()
+        self.screen = screen  # returns True for web text that tries to instruct the model
         self._impl: dict[str, Callable[..., Awaitable[str]]] = {
             "get_weather": self.get_weather,
             "get_news": self.get_news,
@@ -139,7 +147,11 @@ class Toolbox:
 
     async def run(self, name: str, arguments: str | None) -> str:
         try:
-            return await self._impl[name](**json.loads(arguments or "{}"))
+            out = await self._impl[name](**json.loads(arguments or "{}"))
+            if name in WEB_TOOLS and self.screen and await self.screen(out):
+                log.warning("tool %s output withheld: looks like instructions to an AI", name)
+                return f"Výsledek nástroje {name} byl vynechán: zdroj obsahoval podezřelý text."
+            return out
         except Exception as e:  # the conversation must go on even if a source is down
             # type only: exception text can carry URLs with credentials, and this string reaches the model
             log.error("tool %s failed: %s", name, type(e).__name__)

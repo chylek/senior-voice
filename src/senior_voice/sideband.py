@@ -4,6 +4,7 @@
 protocol logic is testable with a list of events; `CallSession.run` wires it to the websocket.
 """
 
+import asyncio
 import json
 import logging
 from collections.abc import AsyncIterable, Awaitable, Callable
@@ -15,6 +16,7 @@ ATTACH_URL = "wss://api.openai.com/v1/live/sessions/{session_id}/attach"
 SPEAKERS = {"session.input_transcript.delta": "Senior", "session.output_transcript.delta": "Asistentka"}
 
 ToolRunner = Callable[[str, str | None], Awaitable[str]]
+TurnHook = Callable[[str, str], Awaitable[list[dict]]]  # (latest senior turn, recent context) -> events
 
 
 @dataclass
@@ -24,8 +26,11 @@ class CallSession:
     turns: list[list[str]] = field(default_factory=list)  # [speaker, text], consecutive deltas merged
     closed_reason: str = ""
     seconds: float = 0.0
+    on_senior_turn: TurnHook | None = None  # sidecar guard; its events are sent when it finishes
+    finished_senior_turns: list[tuple[str, str]] = field(default_factory=list)  # (latest, recent context)
     _seen: set[str] = field(default_factory=set)
     _done_calls: set[str] = field(default_factory=set)
+    _guard_tasks: set[asyncio.Task] = field(default_factory=set)
 
     @property
     def transcript(self) -> str:
@@ -34,8 +39,13 @@ class CallSession:
     def _add(self, who: str, text: str) -> None:
         if self.turns and self.turns[-1][0] == who:
             self.turns[-1][1] += text
-        else:
-            self.turns.append([who, text])
+            return
+        if (
+            self.turns and self.turns[-1][0] == "Senior"
+        ):  # there is no turn-end event: a speaker change ends it
+            recent = "\n".join(f"{w}: {t.strip()}" for w, t in self.turns[-6:])
+            self.finished_senior_turns.append((self.turns[-1][1].strip(), recent))
+        self.turns.append([who, text])
 
     async def handle(self, event: dict) -> list[dict]:
         """Process one server event; return client events to send back."""
@@ -76,9 +86,27 @@ class CallSession:
             {"type": "response.create", "event_id": f"go_{call_id}"},  # required to resume the backend
         ]
 
+    async def _guard(self, latest: str, recent: str, send: Callable[[str], Awaitable[None]]) -> None:
+        try:
+            for out in await self.on_senior_turn(latest, recent):
+                if not self.closed_reason:
+                    await send(json.dumps(out))
+        except Exception as e:  # the guard is best-effort; never take the call down with it
+            log.error("guard hook failed: %s", type(e).__name__)
+
     async def run(self, messages: AsyncIterable[str], send: Callable[[str], Awaitable[None]]) -> None:
         async for raw in messages:
             for out in await self.handle(json.loads(raw)):
                 await send(json.dumps(out))
+            while self.on_senior_turn and self.finished_senior_turns:
+                # off the event loop's critical path: the conversation goes on while the guard checks
+                task = asyncio.create_task(self._guard(*self.finished_senior_turns.pop(0), send))
+                self._guard_tasks.add(task)
+                task.add_done_callback(self._guard_tasks.discard)
             if self.closed_reason:
                 break
+        if self.on_senior_turn and self.turns and self.turns[-1][0] == "Senior":  # senior spoke last
+            recent = "\n".join(f"{w}: {t.strip()}" for w, t in self.turns[-6:])
+            self._guard_tasks.add(asyncio.create_task(self._guard(self.turns[-1][1].strip(), recent, send)))
+        if self._guard_tasks:  # let alerts go out even if the caller hung up mid-check
+            await asyncio.wait(self._guard_tasks, timeout=10)

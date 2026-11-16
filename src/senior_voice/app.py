@@ -19,6 +19,7 @@ from openai import AsyncOpenAI
 
 from . import librarian, prompts, tools
 from .config import Settings
+from .guard import CallGuard, Guard
 from .notify import Telegram
 from .sideband import ATTACH_URL, CallSession
 from .store import Store
@@ -42,7 +43,14 @@ class Companion:
         self.store = Store(settings.data_dir)
         self.telegram = Telegram(http, settings.telegram_token, settings.telegram_chat)
         self.memory_lock = asyncio.Lock()  # ponytail: single process; a shared store would need a DB lock
-        self.tools = tools.Toolbox(http, self.store, self.telegram, memory_lock=self.memory_lock)
+        self.guard = Guard(http, settings.openai_api_key, settings.jev_api_key) if settings.guard else None
+        self.tools = tools.Toolbox(
+            http,
+            self.store,
+            self.telegram,
+            memory_lock=self.memory_lock,
+            screen=self.guard.is_injection if self.guard else None,
+        )
         self.seen_sessions: set[str] = set()  # webhooks are at-least-once; accept each session only once
 
     async def session_config(self, mode: prompts.Mode) -> dict:
@@ -74,7 +82,10 @@ class Companion:
 
     async def handle_call(self, session_id: str, mode: prompts.Mode) -> None:
         started = dt.datetime.now()
-        call = CallSession(session_id, self.tools.run)
+        call_guard = CallGuard(self.guard, self.tools.escalate) if self.guard and self.guard.enabled else None
+        call = CallSession(
+            session_id, self.tools.run, on_senior_turn=call_guard.on_senior_turn if call_guard else None
+        )
         try:
             r = await self.http.post(
                 f"https://api.openai.com/v1/live/sessions/{session_id}/accept",
@@ -89,6 +100,14 @@ class Companion:
             ) as ws:
                 await call.run(ws, ws.send)
             log.info("closed %s reason=%s seconds=%s", session_id, call.closed_reason, call.seconds)
+            if call_guard and call_guard.checks:
+                ms = sorted(max(c.latency_ms.values(), default=0) for c in call_guard.checks)
+                log.info(
+                    "guard: %d turns checked, p50 %.0f ms, fired %s",
+                    len(ms),
+                    ms[len(ms) // 2],
+                    call_guard.fired or "-",
+                )
         except Exception as e:  # a failed call must be visible to the family, not just a log line
             log.error("call %s failed: %s", session_id, type(e).__name__)
             await self._notify(f"⚠️ Hovor s asistentkou ({mode}, {started:%-d. %-m. %H:%M}) selhal technicky.")

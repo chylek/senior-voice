@@ -13,8 +13,10 @@ from pathlib import Path
 import httpx
 from openai import AsyncOpenAI
 
+from ..guard import Guard
 from ..store import Store
-from . import crossjudge
+from . import crossjudge, guard_eval
+from .guard_cases import HELD_OUT
 from .jev import JevJudge
 from .rubric import CRITERIA, Verdict, judge
 from .scenarios import BY_ID, SCENARIOS
@@ -205,6 +207,20 @@ def print_report(report: dict, n_orig: int, n_seeded: int) -> None:
         print(f"  {c:<18}" + "".join(f"{report['pairs'][p]['agreement'][c]['kappa']:>+14.2f}" for p in pairs))
 
 
+async def run_guard(args, client: AsyncOpenAI) -> list[dict]:
+    async with httpx.AsyncClient(timeout=30) as http:
+        guard = Guard(http, client.api_key, os.environ.get("JEV_API_KEY", ""))
+        reports = {
+            "dev": await guard_eval.run(guard),
+            "held_out": await guard_eval.run(guard, HELD_OUT),
+        }
+    for name, report in reports.items():
+        print(f"== {name}")
+        guard_eval.print_report(report)
+        print()
+    return [{"case": f"_guard_{name}", "score": 0, **r} for name, r in reports.items()]
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="senior-voice-eval", description=__doc__)
     parser.add_argument("--judge-model", default="gpt-6-luna")
@@ -235,15 +251,22 @@ def main(argv: list[str] | None = None) -> None:
     cj.add_argument("--data-dir", default="data")
     tr = sub.add_parser("transcripts", help="judge real call transcripts")
     tr.add_argument("dir")
+    sub.add_parser("guard", help="precision/recall/latency of the sidecar guard on labelled utterances")
     args = parser.parse_args(argv)
 
     client = AsyncOpenAI()
-    runner = {"sim": run_sim, "transcripts": run_transcripts, "crossjudge": run_crossjudge}[args.command]
+    runner = {
+        "sim": run_sim,
+        "transcripts": run_transcripts,
+        "crossjudge": run_crossjudge,
+        "guard": run_guard,
+    }[args.command]
     results = asyncio.run(runner(args, client))
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     path = out / f"{dt.datetime.now():%Y%m%d-%H%M%S}-{args.command}.jsonl"
     path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in results))
     scored = [r for r in results if not r["case"].startswith("_")]
-    mean = sum(r["score"] for r in scored) / len(scored) if scored else 0
-    print(f"\nmean score {mean:.0%} over {len(scored)} cases → {path}")
+    if scored:
+        print(f"\nmean score {sum(r['score'] for r in scored) / len(scored):.0%} over {len(scored)} cases")
+    print(f"results → {path}")
